@@ -3,9 +3,6 @@ kind: Deployment
 metadata:
   name: backend
   namespace: ticketboard
-  labels:
-    app: backend
-    component: api
 spec:
   replicas: 2
   selector:
@@ -15,71 +12,30 @@ spec:
     metadata:
       labels:
         app: backend
-        component: api
     spec:
       containers:
         - name: backend
-          image: localhost:5000/backend:latest
+          image: localhost:5000/ticketboard-backend:latest
           ports:
             - containerPort: 3000
           env:
             - name: NODE_ENV
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: NODE_ENV
+              value: "production"
             - name: DB_HOST
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: DB_HOST
-            - name: DB_PORT
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: DB_PORT
-            - name: DB_NAME
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: DB_NAME
-            - name: DB_USER
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: DB_USER
+              value: "postgres-service"
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: backend-secrets
                   key: DB_PASSWORD
-            - name: JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: backend-secrets
-                  key: JWT_SECRET
-            - name: JWT_EXPIRES_IN
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: JWT_EXPIRES_IN
-            - name: CORS_ORIGIN
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: CORS_ORIGIN
-            - name: PORT
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: PORT
           resources:
             requests:
-              memory: "128Mi"
               cpu: "100m"
+              memory: "128Mi"
             limits:
+              cpu: "500m"
               memory: "256Mi"
-              cpu: "200m"
+          # ADD health checks
           livenessProbe:
             httpGet:
               path: /api/health
