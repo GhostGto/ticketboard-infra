@@ -1,0 +1,23 @@
+name: Deploy All Services
+
+on:
+  repository_dispatch:
+    types: [ deploy-all ]
+  workflow_dispatch:
+
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Kind
+        uses: engineerd/setup-kind@v0.6.0
+
+      - name: Deploy Infrastructure
+        run: |
+          kubectl apply -k k8s/base/
+          kubectl apply -k k8s/database/
+          kubectl apply -k k8s/backend/
+          kubectl apply -k k8s/frontend/
