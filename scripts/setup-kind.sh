@@ -1,36 +1,74 @@
 #!/bin/bash
 
-set -e
-
 echo "=== Setting up Kind cluster ==="
 
-# Create registry container unless it already exists
-reg_name='kind-registry'
-reg_port='5000'
-running="$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)"
-if [ "${running}" != 'true' ]; then
-  echo "Creating local registry container..."
-  docker run \
-    -d --restart=always -p "${reg_port}:5000" --name "${reg_name}" \
-    registry:2
-fi
+# Crear registry local
+echo "Creating local registry container..."
+docker run -d --restart=always -p 5000:5000 --name kind-registry registry:2
 
-# Create kind cluster
+# Crear cluster Kind
 echo "Creating Kind cluster..."
-kind create cluster --config=kind-cluster.yaml
+cat <<EOF | kind create cluster --config=-
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: ticketboard-cluster
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
+    endpoint = ["http://kind-registry:5000"]
+nodes:
+- role: control-plane
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      kubeletExtraArgs:
+        node-labels: "ingress-ready=true"
+  extraPortMappings:
+  - containerPort: 80
+    hostPort: 80
+    protocol: TCP
+  - containerPort: 443
+    hostPort: 443
+    protocol: TCP
+  - containerPort: 30000
+    hostPort: 30000
+    protocol: TCP
+  - containerPort: 30001
+    hostPort: 30001
+    protocol: TCP
+EOF
 
-# Connect the registry to the cluster network
-docker network connect "kind" "${reg_name}" || true
+# Conectar registry al cluster
+echo "Connecting registry to cluster..."
+docker network connect kind kind-registry || true
 
-# Install ingress-nginx
+# Configurar kubectl
+echo "Configuring kubectl context..."
+kubectl cluster-info --context kind-ticketboard-cluster
+
+# Instalar ingress-nginx
 echo "Installing ingress-nginx..."
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
 
-# Wait for ingress controller to be ready
+# Esperar a que ingress-nginx esté listo (con manejo de errores mejorado)
 echo "Waiting for ingress controller to be ready..."
-kubectl wait --namespace ingress-nginx \
-  --for=condition=ready pod \
-  --selector=app.kubernetes.io/component=controller \
-  --timeout=90s
+sleep 10
 
-echo "=== Kind cluster setup complete! ==="
+# Esperar con timeout y reintentos
+for i in {1..30}; do
+  if kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller | grep -q "Running"; then
+    echo "✅ Ingress controller is ready!"
+    break
+  fi
+  echo "⏳ Waiting for ingress controller... (attempt $i/30)"
+  sleep 10
+done
+
+# Verificar estado final
+echo "=== Cluster Setup Complete ==="
+kubectl get nodes
+kubectl get pods -n ingress-nginx
+kubectl get all -A | grep ingress
+
+echo "🚀 Kind cluster is ready for deployment!"
