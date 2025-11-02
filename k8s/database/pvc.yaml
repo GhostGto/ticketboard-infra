@@ -3,12 +3,9 @@ kind: PersistentVolumeClaim
 metadata:
   name: postgres-pvc
   namespace: ticketboard
-  labels:
-    app: postgres
-    component: database
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 5Gi
+      storage: 1Gi

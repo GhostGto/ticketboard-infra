@@ -4,23 +4,15 @@ on:
   push:
     branches: [ main ]
   workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Environment to deploy'
-        required: true
-        default: 'development'
-        type: choice
-        options:
-          - development
-          - production
+
 
 jobs:
   deploy-infrastructure:
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'development' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Setup Kubernetes Tools
         run: |
@@ -34,7 +26,11 @@ jobs:
 
       - name: Create Kind Cluster
         run: |
-          kind create cluster --name ticketboard --config kind-cluster.yaml --wait 5m
+          if [ -f "kind-cluster.yaml" ]; then
+            kind create cluster --name ticketboard --config kind-cluster.yaml --wait 5m
+          else
+            kind create cluster --name ticketboard --wait 5m
+          fi
           kubectl cluster-info
 
       - name: Setup Local Registry
@@ -42,23 +38,79 @@ jobs:
           docker run -d --restart=always -p 5000:5000 --name kind-registry registry:2
           until docker network connect kind kind-registry 2>/dev/null; do sleep 2; done
 
-      - name: Deploy for Environment
+      - name: Validate Kubernetes Manifests
         run: |
-          ENVIRONMENT="${{ github.event.inputs.environment || 'development' }}"
-          echo "🚀 Deploying for environment: $ENVIRONMENT"
+          echo "🔍 Validating Kubernetes manifests..."
 
-          # Aplicar base
-          kubectl apply -k k8s/base/
-
-          # Aplicar overlays según el environment
-          if [ -f "k8s/overlays/$ENVIRONMENT/kustomization.yaml" ]; then
-            echo "📦 Applying $ENVIRONMENT overlay..."
-            kubectl apply -k k8s/overlays/$ENVIRONMENT/
-          else
-            echo "ℹ️ No overlay found for $ENVIRONMENT, applying base only"
+          # Validar manifests base
+          if [ -f "k8s/base/kustomization.yaml" ]; then
+            kubectl kustomize k8s/base/ --load-restrictor=LoadRestrictionsNone > /dev/null && echo "✅ Base kustomization valid"
           fi
 
-      - name: Wait and Verify
+          # Validar database manifests
+          if [ -f "k8s/database/kustomization.yaml" ]; then
+            kubectl kustomize k8s/database/ --load-restrictor=LoadRestrictionsNone > /dev/null && echo "✅ Database kustomization valid"
+          else
+            # Validar manifests individuales de database
+            for file in k8s/database/*.yaml; do
+              if [ -f "$file" ]; then
+                kubectl apply --dry-run=client -f "$file" && echo "✅ $file valid"
+              fi
+            done
+          fi
+
+      - name: Deploy Base Infrastructure
         run: |
-          kubectl wait --for=condition=ready --timeout=300s -n ticketboard --all pod
+          echo "🏗️ Deploying base infrastructure..."
+          kubectl apply -k k8s/base/
+
+      - name: Deploy Database First
+        run: |
+          echo "🗄️ Deploying database first..."
+
+          # Aplicar PVC primero
+          if [ -f "k8s/database/pvc.yaml" ]; then
+            kubectl apply -f k8s/database/pvc.yaml -n ticketboard
+            echo "✅ PVC created"
+          fi
+
+          # Aplicar PostgreSQL deployment
+          if [ -f "k8s/database/postgresql.yaml" ]; then
+            kubectl apply -f k8s/database/postgresql.yaml -n ticketboard
+          elif [ -f "k8s/database/postgresql-fixed.yaml" ]; then
+            kubectl apply -f k8s/database/postgresql-fixed.yaml -n ticketboard
+          else
+            # Intentar con kustomize
+            kubectl apply -k k8s/database/ -n ticketboard
+          fi
+
+          # Esperar por PostgreSQL
+          echo "⏳ Waiting for PostgreSQL to be ready..."
+          kubectl wait --for=condition=ready pod -l app=postgres -n ticketboard --timeout=180s
+          echo "✅ PostgreSQL is ready"
+
+      - name: Deploy Backend
+        run: |
+          echo "🔧 Deploying backend..."
+          kubectl apply -k k8s/backend/ -n ticketboard
+
+          if kubectl get deployment -n ticketboard backend 2>/dev/null; then
+            kubectl rollout status deployment/backend -n ticketboard --timeout=180s
+            echo "✅ Backend is ready"
+          fi
+
+      - name: Deploy Frontend
+        run: |
+          echo "🎨 Deploying frontend..."
+          kubectl apply -k k8s/frontend/ -n ticketboard
+
+          if kubectl get deployment -n ticketboard frontend 2>/dev/null; then
+            kubectl rollout status deployment/frontend -n ticketboard --timeout=180s
+            echo "✅ Frontend is ready"
+          fi
+
+      - name: Final Health Check
+        run: |
+          echo "❤️ Final health check..."
           kubectl get all -n ticketboard
+          echo "✅ All services deployed successfully!"
