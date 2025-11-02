@@ -1,33 +1,158 @@
-name: Deploy Platform
+name: Deploy Infrastructure
 
 on:
-  repository_dispatch:
-    types: [ backend-updated, frontend-updated ]
   push:
     branches: [ main ]
   workflow_dispatch:
 
 
-env:
-  NAMESPACE: ticketboard
-
 jobs:
-  deploy:
+  deploy-infrastructure:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Kind Cluster
-        uses: engineerd/setup-kind@v0.6.0
-        with:
-          version: "v0.20.0"
-          config: kind-cluster.yaml
+        run: |
+          # Instalar Kind manualmente (sin actions de terceros)
+          echo "📥 Installing Kind..."
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+          # Instalar kubectl
+          echo "📥 Installing kubectl..."
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+
+          # Verificar instalaciones
+          kind version
+          kubectl version --client
+
+      - name: Create Kind Cluster
+        run: |
+          # Crear cluster Kind
+          echo "🚀 Creating Kind cluster..."
+          cat <<EOF | kind create cluster --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          name: ticketboard
+          nodes:
+          - role: control-plane
+            kubeadmConfigPatches:
+            - |
+              kind: InitConfiguration
+              nodeRegistration:
+                kubeletExtraArgs:
+                  node-labels: "ingress-ready=true"
+            extraPortMappings:
+            - containerPort: 80
+              hostPort: 80
+              protocol: TCP
+            - containerPort: 443
+              hostPort: 443
+              protocol: TCP
+            - containerPort: 30000
+              hostPort: 30000
+              protocol: TCP
+            - containerPort: 30001
+              hostPort: 30001
+              protocol: TCP
+          EOF
+
+          # Verificar cluster
+          echo "🔍 Verifying cluster..."
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Setup Local Registry
+        run: |
+          # Configurar registry local
+          echo "🐳 Setting up local registry..."
+          docker run -d --restart=always -p 5000:5000 --name kind-registry registry:2
+
+          # Conectar registry al network de Kind
+          until docker network connect kind kind-registry 2>/dev/null; do
+            echo "⏳ Waiting for kind network..."
+            sleep 2
+          done
+
+          # Configurar containerd para usar el registry
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: local-registry-hosting
+            namespace: kube-public
+          data:
+            localRegistryHosting.v1: |
+              host: "localhost:5000"
+              help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
+          EOF
+
+          # Verificar registry
+          sleep 5
+          curl -f http://localhost:5000/v2/_catalog && echo "✅ Registry is ready"
+
+      - name: Create Namespace
+        run: |
+          # Crear namespace para la aplicación
+          echo "📁 Creating namespace..."
+          kubectl create namespace ticketboard --dry-run=client -o yaml | kubectl apply -f -
+          kubectl get namespaces
 
       - name: Deploy Infrastructure
         run: |
-          ./scripts/deploy-all.sh
+          # Aplicar todos los manifests de Kubernetes
+          echo "🚀 Deploying Kubernetes manifests..."
 
-      - name: Health Check
+          if [ -d "kubernetes" ]; then
+            echo "📂 Applying manifests from kubernetes/ directory"
+            kubectl apply -f kubernetes/ -n ticketboard --recursive
+          else
+            echo "📂 Applying manifests from current directory"
+            kubectl apply -f . -n ticketboard --recursive
+          fi
+
+          # Esperar a que los recursos estén listos
+          echo "⏳ Waiting for resources to be ready..."
+          kubectl wait --for=condition=ready --timeout=300s -n ticketboard --all pod
+
+      - name: Verify Deployment
         run: |
-          ./scripts/health-check.sh
+          # Verificar el estado del despliegue
+          echo "🔍 Verifying deployment..."
+          kubectl get all -n ticketboard -o wide
+          kubectl get ingress -n ticketboard 2>/dev/null || echo "No ingress resources"
+
+      - name: Health Check Services
+        run: |
+          # Health checks básicos
+          echo "❤️ Performing health checks..."
+
+          # Verificar que los servicios estén creados
+          SERVICES=$(kubectl get svc -n ticketboard -o jsonpath='{.items[*].metadata.name}')
+          echo "Services found: $SERVICES"
+
+          for service in $SERVICES; do
+            echo "🔍 Checking service: $service"
+            kubectl get svc/$service -n ticketboard
+          done
+
+      - name: Store Kubeconfig for other workflows
+        if: always()
+        run: |
+          # Guardar kubeconfig para uso en otros workflows (opcional)
+          mkdir -p /tmp/kubeconfig
+          kind get kubeconfig --name ticketboard > /tmp/kubeconfig/config
+          echo "Kubeconfig stored for potential reuse"
+
+      - name: Cleanup on failure
+        if: failure()
+        run: |
+          echo "🧹 Cleaning up due to failure..."
+          kind delete cluster --name ticketboard || true
+          docker stop kind-registry || true
+          docker rm kind-registry || true
