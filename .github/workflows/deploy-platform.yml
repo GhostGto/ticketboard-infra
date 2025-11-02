@@ -1,33 +1,88 @@
-name: Deploy Platform
+name: Deploy Complete TicketBoard
 
 on:
-  repository_dispatch:
-    types: [ backend-updated, frontend-updated ]
   push:
     branches: [ main ]
   workflow_dispatch:
 
 
-env:
-  NAMESPACE: ticketboard
-
 jobs:
-  deploy:
+  deploy-infrastructure:
     runs-on: ubuntu-latest
+    outputs:
+      cluster-ready: ${{ steps.status.outputs.ready }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Kind Cluster
-        uses: engineerd/setup-kind@v0.6.0
+      - name: Checkout Infra
+        uses: actions/checkout@v4
         with:
-          version: "v0.20.0"
-          config: kind-cluster.yaml
+          repository: GhostGto/ticketboard-infra
+          path: infra
 
-      - name: Deploy Infrastructure
+      - name: Setup Cluster
         run: |
-          ./scripts/deploy-all.sh
+          cd infra
+          chmod +x scripts/setup-kind.sh
+          ./scripts/setup-kind.sh
+          echo "ready=true" >> $GITHUB_OUTPUT
 
-      - name: Health Check
+  deploy-backend:
+    runs-on: ubuntu-latest
+    needs: deploy-infrastructure
+    if: needs.deploy-infrastructure.outputs.cluster-ready == 'true'
+
+    steps:
+      - name: Checkout Backend
+        uses: actions/checkout@v4
+        with:
+          repository: GhostGto/ticketboard-backend
+          path: backend
+
+      - name: Build and Deploy Backend
         run: |
-          ./scripts/health-check.sh
+          cd backend
+          docker build -t localhost:5000/ticketboard-backend:latest .
+          docker push localhost:5000/ticketboard-backend:latest
+          kubectl apply -k k8s/backend/ -n ticketboard
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    needs: [ deploy-infrastructure, deploy-backend ]
+
+    steps:
+      - name: Checkout Frontend
+        uses: actions/checkout@v4
+        with:
+          repository: GhostGto/ticketboard-frontend
+          path: frontend
+
+      - name: Build and Deploy Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+          docker build -t localhost:5000/ticketboard-frontend:latest .
+          docker push localhost:5000/ticketboard-frontend:latest
+          kubectl apply -k k8s/frontend/ -n ticketboard
+
+  verify-deployment:
+    runs-on: ubuntu-latest
+    needs: [ deploy-backend, deploy-frontend ]
+
+    steps:
+      - name: Checkout Infra
+        uses: actions/checkout@v4
+        with:
+          repository: GhostGto/ticketboard-infra
+          path: infra
+
+      - name: Verify Complete Deployment
+        run: |
+          cd infra
+          kubectl wait --for=condition=ready --timeout=300s -n ticketboard --all pod
+          echo "✅ TICKETBOARD DEPLOYMENT COMPLETED SUCCESSFULLY!"
+          echo ""
+          echo "🎉 Your application is now running!"
+          echo ""
+          echo "📊 Final Status:"
+          kubectl get all -n ticketboard
