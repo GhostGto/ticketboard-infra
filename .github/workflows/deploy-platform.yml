@@ -1,4 +1,4 @@
-name: Deploy Complete Application
+name: Deploy to Kubernetes
 
 on:
   push:
@@ -11,103 +11,60 @@ jobs:
     runs-on: self-hosted
 
     steps:
-      - name: Checkout Infra
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Kubernetes Tools
+      - name: Configure Kubernetes
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x ./kubectl
-          sudo mv ./kubectl /usr/local/bin/kubectl
+          kubectl config use-context docker-desktop
+          kubectl create namespace ticketboard --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Cleanup Existing Clusters
+      - name: Configure local registry secret
         run: |
-          echo "🧹 Checking for existing clusters..."
-          # Listar y eliminar todos los clusters existentes
-          kind get clusters || echo "No existing clusters found"
-          for cluster in $(kind get clusters 2>/dev/null || true); do
-            echo "Deleting cluster: $cluster"
-            kind delete cluster --name "$cluster"
-          done
-
-      - name: Create Registry
-        run: |
-          echo "🐳 Setting up registry..."
-          # Eliminar registry existente si existe
-          docker stop registry 2>/dev/null || true
-          docker rm registry 2>/dev/null || true
-          # Crear nuevo registry
-          docker run -d --restart=always -p 5000:5000 --name registry registry:2
-
-      - name: Create Kind Cluster
-        run: |
-          echo "🚀 Creating Kind cluster..."
-          # Crear cluster sin nombre específico (usa el default)
-          kind create cluster --wait 5m
-
-          echo "🔗 Connecting registry to cluster..."
-          docker network connect kind registry || true
-
-          echo "🔍 Verifying cluster creation..."
-          # Verificar que el cluster se creó
-          kind get clusters
-          kubectl cluster-info
-          kubectl get nodes
-
-      - name: Configure Kubectl Properly
-        run: |
-          echo "⚙️ Configuring kubectl context..."
-          # Obtener el nombre REAL del cluster
-          CLUSTER_NAME=$(kind get clusters | head -1)
-          echo "Using cluster: $CLUSTER_NAME"
-
-          # Exportar kubeconfig para el cluster real
-          kind export kubeconfig --name "$CLUSTER_NAME"
-
-          # Verificar la configuración
-          kubectl config current-context
-          kubectl cluster-info
-          kubectl get nodes
-
-      - name: Deploy Base Infrastructure
-        run: |
-          echo "🏗️ Deploying base infrastructure..."
-          kubectl apply -k k8s/base/ --validate=false
-          echo "✅ Base deployed"
+          kubectl create secret docker-registry local-registry \
+            --docker-server=host.docker.internal:5000 \
+            --docker-username= \
+            --docker-password= \
+            --docker-email= \
+            -n ticketboard --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy Database
         run: |
-          echo "🗄️ Deploying database..."
-          kubectl apply -k k8s/database/ -n ticketboard --validate=false
-          echo "⏳ Waiting for PostgreSQL..."
-          kubectl wait --for=condition=ready pod -l app=postgres -n ticketboard --timeout=180s
-          echo "✅ Database deployed"
+          kubectl apply -f k8s/postgres-pvc.yaml
+          kubectl apply -f k8s/postgres-deployment.yaml
+          kubectl apply -f k8s/postgres-service.yaml
 
-      - name: Deploy Backend
+      - name: Wait for database
         run: |
-          echo "🔧 Deploying backend..."
-          kubectl apply -k k8s/backend/ -n ticketboard --validate=false
-          echo "✅ Backend deployed"
+          echo "⏳ Waiting for PostgreSQL to be ready..."
+          for i in {1..30}; do
+            if kubectl get pod -n ticketboard -l app=postgres -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q Running; then
+              echo "✅ PostgreSQL is running"
+              break
+            fi
+            echo "⏱️ Attempt $i/30 - Waiting for PostgreSQL..."
+            sleep 10
+          done
 
-      - name: Deploy Frontend
+      - name: Deploy Backend and Frontend
         run: |
-          echo "🎨 Deploying frontend..."
-          kubectl apply -k k8s/frontend/ -n ticketboard --validate=false
-          echo "✅ Frontend deployed"
+          kubectl apply -f k8s/backend-deployment.yaml
+          kubectl apply -f k8s/backend-service.yaml
+          kubectl apply -f k8s/frontend-deployment.yaml
+          kubectl apply -f k8s/frontend-service.yaml
 
-      - name: Wait for All Services
+      - name: Update images to use local registry
+        run: |
+          kubectl set image deployment/backend -n ticketboard backend=host.docker.internal:5000/ticketboard-backend:latest
+          kubectl set image deployment/frontend -n ticketboard frontend=host.docker.internal:5000/ticketboard-frontend:latest
+
+      - name: Wait for all services
         run: |
           echo "⏳ Waiting for all services to be ready..."
-          kubectl wait --for=condition=ready --timeout=300s -n ticketboard --all pod
+          timeout 300s bash -c 'until kubectl get pods -n ticketboard -l app=backend --no-headers | grep -q "Running"; do sleep 5; done'
+          timeout 300s bash -c 'until kubectl get pods -n ticketboard -l app=frontend --no-headers | grep -q "Running"; do sleep 5; done'
 
-          echo "🎉 TICKETBOARD DEPLOYED SUCCESSFULLY!"
-          echo ""
-          echo "📊 Final Status:"
+      - name: Verify deployment
+        run: |
+          echo "✅ Deployment completed!"
           kubectl get all -n ticketboard
-          echo ""
-          echo "🌐 Access URLs:"
-          echo "   Frontend: http://localhost:30000"
-          echo "   Backend:  http://localhost:30001"

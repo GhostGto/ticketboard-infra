@@ -9,5 +9,4 @@ spec:
   resources:
     requests:
       storage: 1Gi
-  # Add storage class name - check what's available in your cluster
   storageClassName: standard

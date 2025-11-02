@@ -3,13 +3,10 @@ kind: Service
 metadata:
   name: backend-service
   namespace: ticketboard
-  labels:
-    app: backend
-    component: api
 spec:
   selector:
     app: backend
   ports:
-    - port: 3000
-      targetPort: 3000
+    - port: 80
+      targetPort: 80
   type: ClusterIP
