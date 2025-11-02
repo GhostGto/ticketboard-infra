@@ -34,22 +34,36 @@ spec:
                 secretKeyRef:
                   name: backend-secrets
                   key: DB_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           volumeMounts:
             - name: postgres-storage
               mountPath: /var/lib/postgresql/data
           livenessProbe:
-            tcpSocket:
-              port: 5432
-            initialDelaySeconds: 30
+            exec:
+              command:
+                - sh
+                - -c
+                - exec pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 45
             periodSeconds: 10
+            timeoutSeconds: 5
           readinessProbe:
             exec:
               command:
-                - pg_isready
-                - -U
-                - $(POSTGRES_USER)
-            initialDelaySeconds: 5
+                - sh
+                - -c
+                - exec pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 15
             periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
       volumes:
         - name: postgres-storage
           persistentVolumeClaim:

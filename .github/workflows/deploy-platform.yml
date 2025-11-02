@@ -1,4 +1,4 @@
-name: Deploy Complete TicketBoard
+name: Deploy to Kubernetes
 
 on:
   push:
@@ -7,82 +7,64 @@ on:
 
 
 jobs:
-  deploy-infrastructure:
-    runs-on: ubuntu-latest
-    outputs:
-      cluster-ready: ${{ steps.status.outputs.ready }}
+  deploy:
+    runs-on: self-hosted
 
     steps:
-      - name: Checkout Infra
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          repository: GhostGto/ticketboard-infra
-          path: infra
 
-      - name: Setup Cluster
+      - name: Configure Kubernetes
         run: |
-          cd infra
-          chmod +x scripts/setup-kind.sh
-          ./scripts/setup-kind.sh
-          echo "ready=true" >> $GITHUB_OUTPUT
+          kubectl config use-context docker-desktop
+          kubectl create namespace ticketboard --dry-run=client -o yaml | kubectl apply -f -
 
-  deploy-backend:
-    runs-on: ubuntu-latest
-    needs: deploy-infrastructure
-    if: needs.deploy-infrastructure.outputs.cluster-ready == 'true'
-
-    steps:
-      - name: Checkout Backend
-        uses: actions/checkout@v4
-        with:
-          repository: GhostGto/ticketboard-backend
-          path: backend
-
-      - name: Build and Deploy Backend
+      - name: Configure local registry secret
         run: |
-          cd backend
-          docker build -t localhost:5000/ticketboard-backend:latest .
-          docker push localhost:5000/ticketboard-backend:latest
-          kubectl apply -k k8s/backend/ -n ticketboard
+          kubectl create secret docker-registry local-registry \
+            --docker-server=host.docker.internal:5000 \
+            --docker-username= \
+            --docker-password= \
+            --docker-email= \
+            -n ticketboard --dry-run=client -o yaml | kubectl apply -f -
 
-  deploy-frontend:
-    runs-on: ubuntu-latest
-    needs: [ deploy-infrastructure, deploy-backend ]
-
-    steps:
-      - name: Checkout Frontend
-        uses: actions/checkout@v4
-        with:
-          repository: GhostGto/ticketboard-frontend
-          path: frontend
-
-      - name: Build and Deploy Frontend
+      - name: Deploy Database
         run: |
-          cd frontend
-          npm ci
-          npm run build
-          docker build -t localhost:5000/ticketboard-frontend:latest .
-          docker push localhost:5000/ticketboard-frontend:latest
-          kubectl apply -k k8s/frontend/ -n ticketboard
+          kubectl apply -f k8s/postgres-pvc.yaml
+          kubectl apply -f k8s/postgres-deployment.yaml
+          kubectl apply -f k8s/postgres-service.yaml
 
-  verify-deployment:
-    runs-on: ubuntu-latest
-    needs: [ deploy-backend, deploy-frontend ]
-
-    steps:
-      - name: Checkout Infra
-        uses: actions/checkout@v4
-        with:
-          repository: GhostGto/ticketboard-infra
-          path: infra
-
-      - name: Verify Complete Deployment
+      - name: Wait for database
         run: |
-          cd infra
-          kubectl wait --for=condition=ready --timeout=300s -n ticketboard --all pod
-          echo "✅ TICKETBOARD DEPLOYMENT COMPLETED SUCCESSFULLY!"
-          echo ""
-          echo "🎉 Your application is now running!"
-          echo ""
-          echo "📊 Final Status:"
+          echo "⏳ Waiting for PostgreSQL to be ready..."
+          for i in {1..30}; do
+            if kubectl get pod -n ticketboard -l app=postgres -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q Running; then
+              echo "✅ PostgreSQL is running"
+              break
+            fi
+            echo "⏱️ Attempt $i/30 - Waiting for PostgreSQL..."
+            sleep 10
+          done
+
+      - name: Deploy Backend and Frontend
+        run: |
+          kubectl apply -f k8s/backend-deployment.yaml
+          kubectl apply -f k8s/backend-service.yaml
+          kubectl apply -f k8s/frontend-deployment.yaml
+          kubectl apply -f k8s/frontend-service.yaml
+
+      - name: Update images to use local registry
+        run: |
+          kubectl set image deployment/backend -n ticketboard backend=host.docker.internal:5000/ticketboard-backend:latest
+          kubectl set image deployment/frontend -n ticketboard frontend=host.docker.internal:5000/ticketboard-frontend:latest
+
+      - name: Wait for all services
+        run: |
+          echo "⏳ Waiting for all services to be ready..."
+          timeout 300s bash -c 'until kubectl get pods -n ticketboard -l app=backend --no-headers | grep -q "Running"; do sleep 5; done'
+          timeout 300s bash -c 'until kubectl get pods -n ticketboard -l app=frontend --no-headers | grep -q "Running"; do sleep 5; done'
+
+      - name: Verify deployment
+        run: |
+          echo "✅ Deployment completed!"
           kubectl get all -n ticketboard

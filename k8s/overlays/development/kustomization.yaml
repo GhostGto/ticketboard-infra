@@ -5,12 +5,12 @@ namespace: ticketboard
 
 bases:
   - ../../base
-  - ../../database
-  - ../../backend
-  - ../../frontend
 
 patchesStrategicMerge:
   - backend-patch.yaml
 
-commonLabels:
-  environment: development
+images:
+  - name: localhost:5000/ticketboard-backend
+    newTag: latest
+  - name: localhost:5000/ticketboard-frontend
+    newTag: latest

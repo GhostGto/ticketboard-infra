@@ -3,13 +3,10 @@ kind: Service
 metadata:
   name: frontend-service
   namespace: ticketboard
-  labels:
-    app: frontend
-    component: ui
 spec:
   selector:
     app: frontend
   ports:
     - port: 80
       targetPort: 80
-  type: ClusterIP
+  type: LoadBalancer

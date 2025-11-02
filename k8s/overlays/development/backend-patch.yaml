@@ -2,11 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend
-  namespace: ticketboard
-  labels:
-    app: backend
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: backend
@@ -15,15 +11,17 @@ spec:
       labels:
         app: backend
     spec:
+      imagePullSecrets:
+        - name: local-registry
       containers:
         - name: backend
-          env:
-            - name: NODE_ENV
-              value: "development"
+          image: local-registry/ticketboard-backend:latest
+          ports:
+            - containerPort: 8080
           resources:
             requests:
-              memory: "64Mi"
-              cpu: "50m"
-            limits:
-              memory: "128Mi"
               cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
